@@ -7,12 +7,12 @@ from datetime import datetime, timedelta
 
 import structlog
 
+from . import watcher
 from .config import DEAL_DEDUP_MINUTES
 from .extract import deal_key
 from .models import Deal, VivinoData
 from .notify import telegram_send
 from .vivino import quick_lookup
-from . import watcher
 
 # Configure structured logging
 structlog.configure(
@@ -133,13 +133,13 @@ class WineDealScanner:
             # Create watcher coroutine and stop event task
             watch_task = asyncio.create_task(watcher.watch_deals(self.process_deal))
             stop_task = asyncio.create_task(self._stop_event.wait())
-            
+
             # Wait for either the watcher to complete or stop signal
             done, pending = await asyncio.wait(
                 [watch_task, stop_task],
                 return_when=asyncio.FIRST_COMPLETED
             )
-            
+
             # Cancel any pending tasks
             for task in pending:
                 task.cancel()
@@ -147,7 +147,7 @@ class WineDealScanner:
                     await task
                 except asyncio.CancelledError:
                     pass
-                    
+
         except Exception as e:
             logger.error("Fatal error in main loop", error=str(e))
             raise

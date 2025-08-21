@@ -19,6 +19,7 @@ dependencies = [
     "httpx>=0.25.0",
     "structlog>=23.2.0",
     "tenacity>=8.2.0",
+    "selectolax>=0.3.17",
 ]
 
 [project.optional-dependencies]

@@ -45,6 +45,87 @@ class VivinoData(BaseModel):
         return " ".join(parts) if parts else "No Vivino data"
 
 
+class DealDetails(BaseModel):
+    """Deal details extracted from LastBottle page HTML."""
+
+    wine_name: str = Field(..., description="Name of the wine")
+    vintage: int | None = Field(None, description="Wine vintage year")
+    bottle_size_ml: int = Field(750, description="Bottle size in milliliters")
+    deal_price: float = Field(..., gt=0, description="LastBottle deal price")
+
+    def __str__(self) -> str:
+        """String representation of deal details."""
+        vintage_str = f" {self.vintage}" if self.vintage else ""
+        size_str = f" ({self.bottle_size_ml}ml)" if self.bottle_size_ml != 750 else ""
+        return f"{self.wine_name}{vintage_str}{size_str}: ${self.deal_price:.2f}"
+
+
+class EnrichedDeal(BaseModel):
+    """Deal enriched with Vivino data."""
+
+    # Core deal information
+    wine_name: str = Field(..., description="Name of the wine")
+    vintage: int | None = Field(None, description="Wine vintage year")
+    bottle_size_ml: int = Field(750, description="Bottle size in milliliters")
+    deal_price: float = Field(..., gt=0, description="LastBottle deal price")
+
+    # Vivino vintage-specific data
+    vintage_rating: float | None = Field(None, ge=1, le=5, description="Vivino rating for specific vintage")
+    vintage_price: float | None = Field(None, gt=0, description="Vivino average price for specific vintage")
+    vintage_reviews: int | None = Field(None, ge=0, description="Number of Vivino reviews for specific vintage")
+
+    # Vivino overall wine data
+    overall_rating: float | None = Field(None, ge=1, le=5, description="Vivino overall wine rating")
+    overall_price: float | None = Field(None, gt=0, description="Vivino overall average price")
+    overall_reviews: int | None = Field(None, ge=0, description="Number of Vivino overall reviews")
+
+    def __str__(self) -> str:
+        """String representation of enriched deal."""
+        vintage_str = f" {self.vintage}" if self.vintage else ""
+        size_str = f" ({self.bottle_size_ml}ml)" if self.bottle_size_ml != 750 else ""
+
+        # Build rating information
+        rating_parts = []
+        if self.vintage_rating:
+            rating_parts.append(f"Vintage: {self.vintage_rating:.1f}★")
+        if self.overall_rating:
+            rating_parts.append(f"Overall: {self.overall_rating:.1f}★")
+
+        rating_str = f" [{', '.join(rating_parts)}]" if rating_parts else ""
+
+        return f"{self.wine_name}{vintage_str}{size_str}: ${self.deal_price:.2f}{rating_str}"
+
+    @property
+    def has_vivino_data(self) -> bool:
+        """Check if any Vivino data is available."""
+        return any([
+            self.vintage_rating, self.vintage_price, self.vintage_reviews,
+            self.overall_rating, self.overall_price, self.overall_reviews
+        ])
+
+    @property
+    def best_rating(self) -> float | None:
+        """Get the best available rating (vintage-specific preferred)."""
+        return self.vintage_rating or self.overall_rating
+
+    @property
+    def best_price_comparison(self) -> dict[str, float | None]:
+        """Compare deal price with Vivino prices."""
+        vivino_price = self.vintage_price or self.overall_price
+
+        if not vivino_price:
+            return {"vivino_price": None, "savings": None, "savings_percent": None}
+
+        savings = vivino_price - self.deal_price
+        savings_percent = (savings / vivino_price) * 100 if vivino_price > 0 else 0
+
+        return {
+            "vivino_price": vivino_price,
+            "savings": savings,
+            "savings_percent": savings_percent
+        }
+
+
 # Bottle size detection patterns and helper function
 # Order matters - more specific patterns should come first
 _SIZE_PATTERNS = [

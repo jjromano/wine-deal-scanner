@@ -5,8 +5,9 @@ import unicodedata
 from typing import Any
 
 from playwright.async_api import Page
+from selectolax.parser import HTMLParser
 
-from .models import Deal, normalize_bottle_size
+from .models import Deal, DealDetails, normalize_bottle_size
 
 
 def deal_key(title: str, vintage: str | None, price: float) -> str:
@@ -238,6 +239,177 @@ async def extract_deal_from_dom(page: Page) -> Deal | None:
             region=region,
             url=url,
             bottle_size_ml=bottle_size_ml
+        )
+
+    except Exception:
+        # Log the error in a real implementation
+        return None
+
+
+def _extract_vintage_from_text(text: str) -> int | None:
+    """Extract vintage year from text."""
+    # Look for 4-digit years that look like wine vintages
+    vintage_match = re.search(r'\b(19[5-9]\d|20[0-4]\d)\b', text)
+    if vintage_match:
+        year = int(vintage_match.group(1))
+        # Only accept reasonable wine vintage years
+        if 1950 <= year <= 2040:
+            return year
+    return None
+
+
+def _extract_bottle_size_from_text(text: str) -> int:
+    """Extract bottle size from text, defaulting to 750ml."""
+    return normalize_bottle_size(text)
+
+
+def _extract_last_bottle_price(text: str) -> float | None:
+    """Extract LastBottle price from text, ignoring retail and best web prices."""
+    # Look for "Last Bottle" followed by a price
+    last_bottle_pattern = re.search(
+        r'last\s+bottle[^$€£]*?([$€£]\s*[\d,]+\.?\d*)',
+        text,
+        re.IGNORECASE
+    )
+    if last_bottle_pattern:
+        price_text = last_bottle_pattern.group(1)
+        price_match = re.search(r'[\d,]+\.?\d*', price_text.replace(',', ''))
+        if price_match:
+            try:
+                return float(price_match.group())
+            except ValueError:
+                pass
+
+    # Look for deal-related pricing patterns
+    deal_patterns = [
+        r'(?:deal|sale|offer|special)\s*[:\-]?\s*([$€£]\s*[\d,]+\.?\d*)',
+        r'([$€£]\s*[\d,]+\.?\d*)\s*(?:deal|sale|offer|special)',
+        r'(?:deal-price|sale-price|current-price|price)\D*([$€£]\s*[\d,]+\.?\d*)',
+    ]
+
+    for pattern in deal_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            price_text = match.group(1)
+            price_match = re.search(r'[\d,]+\.?\d*', price_text.replace(',', ''))
+            if price_match:
+                try:
+                    return float(price_match.group())
+                except ValueError:
+                    continue
+
+    # Final fallback: any price that's not explicitly marked as retail/best web
+    # Split text into lines and check each for prices
+    lines = text.split('\n')
+    for line in lines:
+        line = line.strip().lower()
+        # Skip lines with retail or best web mentions
+        if 'retail' in line or 'best web' in line:
+            continue
+
+        # Look for price patterns
+        price_match = re.search(r'([$€£]\s*[\d,]+\.?\d*)', line)
+        if price_match:
+            price_text = price_match.group(1)
+            price_num_match = re.search(r'[\d,]+\.?\d*', price_text.replace(',', ''))
+            if price_num_match:
+                try:
+                    return float(price_num_match.group())
+                except ValueError:
+                    continue
+
+    return None
+
+
+def extract_deal_details(html: str) -> DealDetails | None:
+    """
+    Extract deal details from LastBottle deal page HTML.
+
+    Args:
+        html: HTML content of the deal page
+
+    Returns:
+        DealDetails instance if extraction successful, None otherwise
+    """
+    try:
+        parser = HTMLParser(html)
+
+        # Extract wine name
+        wine_name = None
+
+        # Try common selectors for wine names
+        name_selectors = [
+            'h1.product-title',
+            'h1.wine-title',
+            'h1.deal-title',
+            '.product-name',
+            '.wine-name',
+            'h1',
+            '.title'
+        ]
+
+        for selector in name_selectors:
+            element = parser.css_first(selector)
+            if element and element.text():
+                wine_name = element.text().strip()
+                break
+
+        # Fallback: look for any heading with wine-like content
+        if not wine_name:
+            headings = parser.css('h1, h2, h3, .name, .title')
+            for heading in headings:
+                if heading.text():
+                    text = heading.text().strip()
+                    # Check if it looks like a wine name (has letters and possibly numbers)
+                    if re.search(r'[a-zA-Z]{3,}', text) and len(text) > 5:
+                        wine_name = text
+                        break
+
+        if not wine_name:
+            return None
+
+        # Get all text for comprehensive analysis
+        all_text = parser.text()
+
+        # Extract vintage
+        vintage = _extract_vintage_from_text(all_text)
+
+        # Extract bottle size
+        bottle_size_ml = _extract_bottle_size_from_text(all_text)
+
+        # Extract deal price (LastBottle price only)
+        deal_price = _extract_last_bottle_price(all_text)
+
+        # Also try to find price in specific elements
+        if deal_price is None:
+            price_selectors = [
+                '.deal-price',
+                '.last-bottle-price',
+                '.sale-price',
+                '.current-price',
+                '.price',
+                '.cost'
+            ]
+
+            for selector in price_selectors:
+                element = parser.css_first(selector)
+                if element and element.text():
+                    price_text = element.text()
+                    # Skip if it contains retail/best web indicators
+                    if not re.search(r'retail|best\s*web', price_text, re.IGNORECASE):
+                        extracted_price = _extract_last_bottle_price(price_text)
+                        if extracted_price:
+                            deal_price = extracted_price
+                            break
+
+        if deal_price is None:
+            return None
+
+        return DealDetails(
+            wine_name=wine_name,
+            vintage=vintage,
+            bottle_size_ml=bottle_size_ml,
+            deal_price=deal_price
         )
 
     except Exception:
