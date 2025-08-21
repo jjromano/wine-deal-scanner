@@ -1,0 +1,33 @@
+name: Live Tests (Manual)
+
+on:
+  workflow_dispatch:  # run from GitHub Actions "Run workflow" button
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pip install playwright httpx selectolax rapidfuzz pydantic tenacity structlog python-dotenv
+
+      - name: Install Playwright browsers
+        run: python -m playwright install --with-deps
+
+      - name: Run live tests
+        env:
+          LIVE_TESTS: "1"
+          # Optionally pass safe envs like USER_AGENT; NEVER commit secrets here.
+        run: |
+          pytest -q -m live
