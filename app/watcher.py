@@ -11,6 +11,7 @@ from playwright.async_api import (
     BrowserContext,
     Page,
     Response,
+    Route,
     async_playwright,
 )
 
@@ -37,6 +38,11 @@ class DealWatcher:
         self.page: Page | None = None
         self.seen_deals: dict[str, float] = {}
         self.running = False
+        self.blocked_requests_count = 0
+        self.last_deal_key: str | None = None
+        self.last_heartbeat = time.time()
+        self.last_dom_check_time = 0.0
+        self.debounce_delay = 0.4  # 400ms debounce
 
     async def __aenter__(self) -> "DealWatcher":
         """Async context manager entry."""
@@ -66,7 +72,7 @@ class DealWatcher:
 
             # Create persistent context
             self.context = await self.browser.new_context(
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+                user_agent=config.USER_AGENT,
                 viewport={"width": 1280, "height": 720},
                 ignore_https_errors=True,
             )
@@ -74,12 +80,78 @@ class DealWatcher:
             # Create page
             self.page = await self.context.new_page()
 
-            logger.info("Browser setup completed successfully")
+            # Setup request blocking in safe mode
+            if config.SAFE_MODE:
+                await self._setup_request_blocking()
+
+            logger.info(
+                "Browser setup completed successfully",
+                safe_mode=config.SAFE_MODE,
+                user_agent=config.USER_AGENT
+            )
 
         except Exception as e:
             await self._cleanup_browser()
             logger.error("Failed to setup browser", error=str(e))
             raise
+
+    async def _setup_request_blocking(self) -> None:
+        """Setup request blocking for safe mode."""
+        if not self.page:
+            return
+
+        # Common analytics and tracking domains to block
+        blocked_domains = {
+            "google-analytics.com",
+            "googletagmanager.com",
+            "facebook.com",
+            "facebook.net",
+            "doubleclick.net",
+            "googlesyndication.com",
+            "googleadservices.com",
+            "adsystem.amazon.com",
+            "amazon-adsystem.com",
+            "scorecardresearch.com",
+            "quantserve.com",
+            "outbrain.com",
+            "taboola.com",
+            "bing.com",
+            "hotjar.com",
+            "fullstory.com",
+            "segment.com",
+            "mixpanel.com",
+            "amplitude.com",
+        }
+
+        async def request_handler(route: Route) -> None:
+            request = route.request
+            url = request.url.lower()
+            resource_type = request.resource_type
+
+            # Block images, media, fonts
+            if resource_type in {"image", "media", "font"}:
+                self.blocked_requests_count += 1
+                await route.abort()
+                return
+
+            # Block analytics domains
+            for domain in blocked_domains:
+                if domain in url:
+                    self.blocked_requests_count += 1
+                    await route.abort()
+                    return
+
+            # Allow XHR, JSON, HTML, CSS, and scripts
+            if resource_type in {"xhr", "fetch", "document", "stylesheet", "script"}:
+                await route.continue_()
+                return
+
+            # Block everything else by default in safe mode
+            self.blocked_requests_count += 1
+            await route.abort()
+
+        await self.page.route("**/*", request_handler)
+        logger.debug("Request blocking setup completed for safe mode")
 
     async def _cleanup_browser(self) -> None:
         """Clean up browser resources."""
@@ -244,8 +316,14 @@ class DealWatcher:
             if not check_requested:
                 return
 
-            # Reset flag
+            # Implement debouncing on Python side
+            current_time = time.time()
+            if current_time - self.last_dom_check_time < self.debounce_delay:
+                return  # Skip if within debounce window
+
+            # Reset flag and update last check time
             await self.page.evaluate("window.dealCheckRequested = false")
+            self.last_dom_check_time = current_time
 
             # Try both extraction methods
             # First try new HTML extraction
@@ -276,6 +354,9 @@ class DealWatcher:
             # Build deduplication key
             key = extract.deal_key(deal_details.wine_name, str(deal_details.vintage) if deal_details.vintage else None, deal_details.deal_price)
             current_time = time.time()
+
+            # Update last deal key for heartbeat logging
+            self.last_deal_key = key
 
             # Check for duplicates within window
             if key in self.seen_deals:
@@ -317,14 +398,14 @@ class DealWatcher:
                 logger.debug("Starting deal enrichment", wine_name=deal_details.wine_name)
                 async with asyncio.timeout(15.0):  # Allow time for Vivino lookup
                     enriched_deal = await enrich_deal(deal_details)
-                    
+
                 logger.info(
                     "Deal enrichment completed",
                     wine_name=deal_details.wine_name,
                     has_vivino_data=enriched_deal.has_vivino_data,
                     best_rating=enriched_deal.best_rating
                 )
-                
+
             except Exception as e:
                 logger.warning(
                     "Deal enrichment failed, proceeding with basic deal info",
@@ -345,7 +426,7 @@ class DealWatcher:
                 logger.debug("Sending Telegram notification", wine_name=deal_details.wine_name)
                 async with asyncio.timeout(15.0):
                     success = await send_telegram_message(enriched_deal)
-                    
+
                 if success:
                     logger.info(
                         "Deal notification sent successfully",
@@ -360,7 +441,7 @@ class DealWatcher:
                         vintage=deal_details.vintage,
                         source=source
                     )
-                    
+
             except Exception as e:
                 logger.error(
                     "Error sending Telegram notification",
@@ -391,10 +472,10 @@ class DealWatcher:
                 bottle_size_ml=deal.bottle_size_ml if hasattr(deal, 'bottle_size_ml') else 750,
                 deal_price=deal.price or 0.0
             )
-            
+
             # Process through new enrichment pipeline
             await self._process_deal_details(deal_details, source)
-            
+
             # Also call the legacy callback for backwards compatibility
             try:
                 async with asyncio.timeout(10.0):
@@ -409,6 +490,26 @@ class DealWatcher:
                 source=source,
                 deal_title=getattr(deal, 'title', 'unknown')
             )
+
+    async def _log_heartbeat(self) -> None:
+        """Log periodic heartbeat with status information."""
+        current_time = time.time()
+
+        # Only log heartbeat every 60 seconds
+        if current_time - self.last_heartbeat < 60.0:
+            return
+
+        self.last_heartbeat = current_time
+
+        logger.info(
+            "Heartbeat",
+            mode="event",
+            page_ready=self.page is not None and self.running,
+            blocked_requests_count=self.blocked_requests_count,
+            last_deal_key=self.last_deal_key,
+            safe_mode=config.SAFE_MODE,
+            seen_deals_count=len(self.seen_deals)
+        )
 
     async def watch(self, on_new_deal: Callable[[Deal], Awaitable[None]]) -> None:
         """Start watching for deals."""
@@ -440,6 +541,9 @@ class DealWatcher:
                 try:
                     # Check DOM for deals periodically
                     await self._check_dom_for_deals(on_new_deal)
+
+                    # Log heartbeat periodically
+                    await self._log_heartbeat()
 
                     # Small delay to prevent excessive CPU usage
                     await asyncio.sleep(1.0)

@@ -25,3 +25,7 @@ TELEGRAM_CHAT_ID: str = get_env_var("TELEGRAM_CHAT_ID")
 VIVINO_TIMEOUT_SECONDS: float = float(get_env_var("VIVINO_TIMEOUT_SECONDS", "1.5"))
 DEAL_DEDUP_MINUTES: int = int(get_env_var("DEAL_DEDUP_MINUTES", "5"))
 LOG_LEVEL: str = get_env_var("LOG_LEVEL", "INFO")
+
+# Safe mode and user agent configuration
+SAFE_MODE: bool = get_env_var("SAFE_MODE", "true").lower() == "true"
+USER_AGENT: str = get_env_var("USER_AGENT", "LastBottleWatcher/0.1 (+you@example.com)")

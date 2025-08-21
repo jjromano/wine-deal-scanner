@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 import structlog
-from tenacity import retry, stop_after_attempt, wait_exponential, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .config import VIVINO_TIMEOUT_SECONDS
 
@@ -37,60 +37,189 @@ def _normalize_wine_name(name: str) -> str:
     return normalized
 
 
-@retry(
-    stop=stop_after_attempt(2),
-    wait=wait_fixed(0.5),
-    reraise=True
-)
-async def _search_vivino(
-    client: httpx.AsyncClient,
-    wine_name: str,
-    vintage: str | None = None
-) -> dict | None:
+def parse_vivino_page(html: str) -> tuple[float | None, int | None, float | None]:
     """
-    Search Vivino for wine data with retry logic.
+    Pure parser function to extract wine data from Vivino HTML page.
 
     Args:
-        client: HTTP client instance
-        wine_name: Name of the wine to search
-        vintage: Optional vintage year
+        html: Raw HTML content from Vivino wine page
 
     Returns:
-        Vivino search result data or None if not found
+        Tuple of (rating, rating_count, avg_price) - all optional
     """
-    # Build search query
-    search_query = _normalize_wine_name(wine_name)
-    if vintage:
-        search_query = f"{search_query} {vintage}"
-
-    # Vivino search API (this is a simplified approach)
-    # In reality, you might need to:
-    # 1. Use Vivino's actual API if available
-    # 2. Scrape their search results (be mindful of rate limits and ToS)
-    # 3. Use a different wine database API
-
-    search_url = "https://www.vivino.com/api/wines/search"
-    params = {
-        "q": search_query,
-        "per_page": 5,
-    }
+    rating = None
+    rating_count = None
+    avg_price = None
 
     try:
-        response = await client.get(search_url, params=params)
-        response.raise_for_status()
+        # Extract rating - look for common patterns in Vivino pages (in priority order)
+        # Pattern 1: JSON-LD structured data
+        rating_match = re.search(r'"ratingValue":\s*"?([0-9.]+)"?', html)
+        if rating_match:
+            rating = float(rating_match.group(1))
 
-        data = response.json()
-        wines = data.get("matches", [])
+        # Pattern 2: Meta property for rating
+        if rating is None:
+            rating_match = re.search(r'<meta[^>]*property="vivino:rating"[^>]*content="([0-9.]+)"', html)
+            if rating_match:
+                rating = float(rating_match.group(1))
 
-        if not wines:
+        # Pattern 3: Data attribute or class-based rating
+        if rating is None:
+            rating_match = re.search(r'data-rating="([0-9.]+)"', html)
+            if rating_match:
+                rating = float(rating_match.group(1))
+
+        # Extract rating count - look for review/rating count patterns (in priority order)
+        # Pattern 1: JSON-LD review count
+        count_match = re.search(r'"reviewCount":\s*"?([0-9,]+)"?', html)
+        if count_match:
+            rating_count = int(count_match.group(1).replace(',', ''))
+
+        # Pattern 2: Meta property for rating count
+        if rating_count is None:
+            count_match = re.search(r'<meta[^>]*property="vivino:rating_count"[^>]*content="([0-9,]+)"', html)
+            if count_match:
+                rating_count = int(count_match.group(1).replace(',', ''))
+
+        # Pattern 3: Text-based rating count (e.g., "1,234 ratings")
+        if rating_count is None:
+            count_match = re.search(r'([0-9,]+)\s*(?:ratings?|reviews?)', html, re.IGNORECASE)
+            if count_match:
+                rating_count = int(count_match.group(1).replace(',', ''))
+
+        # Extract average price - look for price patterns (in priority order)
+        # Pattern 1: JSON-LD price
+        price_match = re.search(r'"price":\s*"?\$?([0-9,]+\.?[0-9]*)"?', html)
+        if price_match:
+            avg_price = float(price_match.group(1).replace(',', ''))
+
+        # Pattern 2: Meta property for price
+        if avg_price is None:
+            price_match = re.search(r'<meta[^>]*property="vivino:price"[^>]*content="\$?([0-9,]+\.?[0-9]*)"', html)
+            if price_match:
+                avg_price = float(price_match.group(1).replace(',', ''))
+
+        # Pattern 3: Data attribute or class-based price
+        if avg_price is None:
+            price_match = re.search(r'data-price="?\$?([0-9,]+\.?[0-9]*)"?', html)
+            if price_match:
+                avg_price = float(price_match.group(1).replace(',', ''))
+
+        # Pattern 4: Text-based price patterns (e.g., "Average price: $1,250.99")
+        if avg_price is None:
+            price_match = re.search(r'(?:average\s+price|price):\s*\$?([0-9,]+\.?[0-9]*)', html, re.IGNORECASE)
+            if price_match:
+                avg_price = float(price_match.group(1).replace(',', ''))
+
+    except (ValueError, TypeError) as e:
+        logger.debug("Error parsing Vivino page", error=str(e))
+
+    logger.debug(
+        "Parsed Vivino page",
+        rating=rating,
+        rating_count=rating_count,
+        avg_price=avg_price
+    )
+
+    return rating, rating_count, avg_price
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=3),
+    reraise=True
+)
+async def resolve_vivino_url(query: str, timeout_s: float = 1.5) -> str | None:
+    """
+    Network layer: Resolve a Vivino search query to a wine page URL.
+
+    Args:
+        query: Search query for the wine
+        timeout_s: Timeout in seconds for the request
+
+    Returns:
+        URL of the wine page, or None if not found
+    """
+    logger.debug("Resolving Vivino URL", query=query, timeout=timeout_s)
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout_s),
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.vivino.com/"
+            }
+        ) as client:
+            # Try Vivino search page
+            search_url = "https://www.vivino.com/search/wines"
+            params = {"q": query}
+
+            response = await client.get(search_url, params=params)
+            response.raise_for_status()
+
+            html = response.text
+
+            # Extract the first wine URL from search results
+            # Look for wine page links in the HTML
+            wine_url_patterns = [
+                r'<a[^>]*href="(/wines/[^"]+)"[^>]*>',
+                r'href="(https://www\.vivino\.com/wines/[^"]+)"',
+                r'"url":"(https://www\.vivino\.com/wines/[^"]+)"',
+                r'"url":"(/wines/[^"]+)"'
+            ]
+
+            for pattern in wine_url_patterns:
+                matches = re.findall(pattern, html)
+                if matches:
+                    wine_path = matches[0]
+                    # Ensure we have a full URL
+                    if wine_path.startswith('/'):
+                        wine_url = f"https://www.vivino.com{wine_path}"
+                    else:
+                        wine_url = wine_path
+
+                    logger.debug("Found Vivino wine URL", query=query, url=wine_url)
+                    return wine_url
+
+            logger.debug("No wine URL found in search results", query=query)
             return None
 
-        # Return the first match (most relevant)
-        # TODO: Implement better matching logic based on name similarity
-        return wines[0]
+    except httpx.HTTPError as e:
+        logger.debug("HTTP error resolving Vivino URL", query=query, error=str(e))
+        raise VivinoLookupError(f"Failed to resolve Vivino URL: {e}")
+    except Exception as e:
+        logger.debug("Unexpected error resolving Vivino URL", query=query, error=str(e))
+        raise VivinoLookupError(f"Unexpected error resolving Vivino URL: {e}")
 
-    except (httpx.HTTPError, ValueError) as e:
-        raise VivinoLookupError(f"Failed to search Vivino: {e}")
+
+async def _fetch_vivino_page(url: str, timeout_s: float = 1.5) -> str:
+    """
+    Fetch the HTML content of a Vivino wine page.
+
+    Args:
+        url: URL of the Vivino wine page
+        timeout_s: Timeout in seconds for the request
+
+    Returns:
+        HTML content of the page
+    """
+    logger.debug("Fetching Vivino page", url=url, timeout=timeout_s)
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout_s),
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.vivino.com/"
+        }
+    ) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        return response.text
 
 
 async def quick_lookup(
@@ -111,41 +240,92 @@ async def quick_lookup(
     """
     try:
         async with asyncio.timeout(timeout_s):
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(timeout_s),
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-                }
-            ) as client:
-                wine_data = await _search_vivino(client, name, vintage)
+            # Normalize and build search query
+            normalized_name = _normalize_wine_name(name)
+            query = f"{normalized_name} {vintage}" if vintage else normalized_name
 
-                if not wine_data:
-                    return None, None, None
+            # Network layer: resolve URL
+            wine_url = await resolve_vivino_url(query, timeout_s * 0.6)  # Use 60% of timeout for URL resolution
+            if not wine_url:
+                return None, None, None
 
-                # Extract data from Vivino response
-                # TODO: Update these field mappings based on actual Vivino API structure
-                wine = wine_data.get("wine", {})
+            # Network layer: fetch page content
+            html = await _fetch_vivino_page(wine_url, timeout_s * 0.4)  # Use 40% of timeout for page fetch
 
-                rating = wine.get("average_rating")
-                rating_count = wine.get("ratings_count")
-
-                # Price data might be in a different structure
-                price_data = wine.get("price", {})
-                avg_price = None
-                if price_data:
-                    avg_price = price_data.get("amount")
-
-                return rating, rating_count, avg_price
+            # Parser layer: extract data from HTML
+            return parse_vivino_page(html)
 
     except TimeoutError:
-        # Timeout exceeded, return empty data
+        logger.debug("Quick lookup timed out", name=name, vintage=vintage, timeout=timeout_s)
         return None, None, None
     except VivinoLookupError:
-        # Lookup failed, return empty data
+        logger.debug("Quick lookup failed", name=name, vintage=vintage)
         return None, None, None
-    except Exception:
-        # Any other error, return empty data to maintain strict timeout
+    except Exception as e:
+        logger.debug("Quick lookup error", name=name, vintage=vintage, error=str(e))
         return None, None, None
+
+
+async def quick_lookup_comprehensive(
+    name: str,
+    vintage: str | None = None,
+    timeout_s: float = VIVINO_TIMEOUT_SECONDS
+) -> dict[str, tuple[float | None, int | None, float | None]]:
+    """
+    Comprehensive Vivino lookup using the new layered approach.
+
+    Args:
+        name: Wine name to search for
+        vintage: Optional vintage year
+        timeout_s: Timeout in seconds (default from config)
+
+    Returns:
+        Dict with keys:
+        - "vintage": Tuple of (rating, rating_count, avg_price) for vintage search
+        - "all": Tuple of (rating, rating_count, avg_price) for general search
+    """
+    result = {
+        "vintage": (None, None, None),
+        "all": (None, None, None)
+    }
+
+    try:
+        async with asyncio.timeout(timeout_s):
+            # Normalize wine name
+            normalized_name = _normalize_wine_name(name)
+
+            # Search with vintage if provided
+            if vintage:
+                vintage_query = f"{normalized_name} {vintage}"
+                try:
+                    # Network layer: resolve URL
+                    wine_url = await resolve_vivino_url(vintage_query, timeout_s * 0.3)
+                    if wine_url:
+                        # Network layer: fetch page content
+                        html = await _fetch_vivino_page(wine_url, timeout_s * 0.2)
+                        # Parser layer: extract data from HTML
+                        result["vintage"] = parse_vivino_page(html)
+                except Exception:
+                    pass  # Continue to general search
+
+            # General search (without vintage)
+            try:
+                # Network layer: resolve URL
+                wine_url = await resolve_vivino_url(normalized_name, timeout_s * 0.3)
+                if wine_url:
+                    # Network layer: fetch page content
+                    html = await _fetch_vivino_page(wine_url, timeout_s * 0.2)
+                    # Parser layer: extract data from HTML
+                    result["all"] = parse_vivino_page(html)
+            except Exception:
+                pass  # Return whatever we have
+
+    except TimeoutError:
+        logger.debug("Quick lookup comprehensive timed out", name=name, vintage=vintage, timeout=timeout_s)
+    except Exception as e:
+        logger.debug("Quick lookup comprehensive error", name=name, vintage=vintage, error=str(e))
+
+    return result
 
 
 def _extract_wine_data(wine_data: dict[str, Any]) -> dict[str, Any]:

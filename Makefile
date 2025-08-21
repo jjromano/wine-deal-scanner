@@ -1,4 +1,4 @@
-.PHONY: setup run fmt lint test clean help
+.PHONY: setup run fmt lint test test-live clean help
 
 # Default target
 .DEFAULT_GOAL := help
@@ -23,9 +23,13 @@ lint:
 	ruff check app/ tests/
 	mypy app/
 
-## Run tests
+## Run tests (excluding live tests)
 test:
-	pytest tests/ -v
+	pytest -q -m "not live"
+
+## Run live network tests
+test-live:
+	LIVE_TESTS=1 pytest -q -m live
 
 ## Clean build artifacts
 clean:

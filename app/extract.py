@@ -246,15 +246,29 @@ async def extract_deal_from_dom(page: Page) -> Deal | None:
         return None
 
 
-def _extract_vintage_from_text(text: str) -> int | None:
+def _extract_vintage_from_text(text: str) -> str | None:
     """Extract vintage year from text."""
+    # Look for explicit vintage patterns first
+    vintage_patterns = [
+        r'vintage[:\s]*(\d{4})',
+        r'<span[^>]*class="vintage"[^>]*>(\d{4})</span>',
+        r'class="vintage"[^>]*>(\d{4})',
+    ]
+
+    for pattern in vintage_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            year = int(match.group(1))
+            if 1950 <= year <= 2040:
+                return str(year)
+
     # Look for 4-digit years that look like wine vintages
     vintage_match = re.search(r'\b(19[5-9]\d|20[0-4]\d)\b', text)
     if vintage_match:
         year = int(vintage_match.group(1))
         # Only accept reasonable wine vintage years
         if 1950 <= year <= 2040:
-            return year
+            return str(year)
     return None
 
 
@@ -266,19 +280,22 @@ def _extract_bottle_size_from_text(text: str) -> int:
 def _extract_last_bottle_price(text: str) -> float | None:
     """Extract LastBottle price from text, ignoring retail and best web prices."""
     # Look for "Last Bottle" followed by a price
-    last_bottle_pattern = re.search(
-        r'last\s+bottle[^$€£]*?([$€£]\s*[\d,]+\.?\d*)',
-        text,
-        re.IGNORECASE
-    )
-    if last_bottle_pattern:
-        price_text = last_bottle_pattern.group(1)
-        price_match = re.search(r'[\d,]+\.?\d*', price_text.replace(',', ''))
-        if price_match:
+    last_bottle_patterns = [
+        r'last\s+bottle[:\s]*\$?([\d,]+\.?\d*)',
+        r'lastbottle[:\s]*\$?([\d,]+\.?\d*)',
+        r'last\s*bottle[^$€£\d]*?([$€£]\s*[\d,]+\.?\d*)',
+    ]
+
+    for pattern in last_bottle_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            price_text = match.group(1)
+            # Remove currency symbols and commas, extract number
+            price_num = re.sub(r'[,$€£\s]', '', price_text)
             try:
-                return float(price_match.group())
+                return float(price_num)
             except ValueError:
-                pass
+                continue
 
     # Look for deal-related pricing patterns
     deal_patterns = [
@@ -410,6 +427,191 @@ def extract_deal_details(html: str) -> DealDetails | None:
             vintage=vintage,
             bottle_size_ml=bottle_size_ml,
             deal_price=deal_price
+        )
+
+    except Exception:
+        # Log the error in a real implementation
+        return None
+
+
+def parse_deal_from_html(html: str) -> Deal | None:
+    """
+    Parse a Deal from LastBottle HTML content using selectolax.
+
+    Args:
+        html: Raw HTML content from LastBottle deal page
+
+    Returns:
+        Deal instance if extraction successful, None otherwise
+    """
+    try:
+        parser = HTMLParser(html)
+
+        # Extract wine name/title
+        wine_name = None
+        name_selectors = [
+            'h1.wine-name',
+            'h1.product-title',
+            'h1.deal-title',
+            '.wine-title',
+            '.product-name',
+            'h1',
+            'h2.title'
+        ]
+
+        for selector in name_selectors:
+            element = parser.css_first(selector)
+            if element and element.text():
+                wine_name = element.text().strip()
+                break
+
+        # Fallback: look for any heading with wine-like content
+        if not wine_name:
+            headings = parser.css('h1, h2, h3, .name, .title')
+            for heading in headings:
+                if heading.text():
+                    text = heading.text().strip()
+                    # Check if it looks like a wine name (has letters and possibly numbers)
+                    if re.search(r'[a-zA-Z]{3,}', text) and len(text) > 5:
+                        wine_name = text
+                        break
+
+        if not wine_name:
+            return None
+
+        # Get all text for comprehensive analysis
+        all_text = parser.text()
+
+        # Extract vintage - first try specific elements, then fallback to text
+        vintage = None
+
+        # Try to find vintage in specific elements first
+        vintage_selectors = ['.vintage', '[class*="vintage"]', '.year', '[class*="year"]']
+        for selector in vintage_selectors:
+            element = parser.css_first(selector)
+            if element and element.text():
+                vintage_text = element.text().strip()
+                vintage_match = re.search(r'\b(\d{4})\b', vintage_text)
+                if vintage_match:
+                    year = int(vintage_match.group(1))
+                    if 1950 <= year <= 2040:
+                        vintage = str(year)
+                        break
+
+        # Fallback to text-based extraction
+        if not vintage:
+            vintage = _extract_vintage_from_text(all_text)
+
+        # Extract bottle size
+        bottle_size_ml = _extract_bottle_size_from_text(all_text)
+
+        # Extract deal price (LastBottle price only)
+        deal_price = _extract_last_bottle_price(all_text)
+
+        # Also try to find price in specific elements
+        if deal_price is None:
+            price_selectors = [
+                '.deal-price',
+                '.last-bottle-price',
+                '.lastbottle-price',
+                '.sale-price',
+                '.current-price',
+                '.price',
+                '.cost'
+            ]
+
+            for selector in price_selectors:
+                element = parser.css_first(selector)
+                if element and element.text():
+                    price_text = element.text()
+                    # Skip if it contains retail/best web indicators
+                    if not re.search(r'retail|best\s*web', price_text, re.IGNORECASE):
+                        extracted_price = _extract_last_bottle_price(price_text)
+                        if extracted_price:
+                            deal_price = extracted_price
+                            break
+
+        if deal_price is None:
+            return None
+
+        # Extract URL - look for canonical URL or deal URL
+        url = None
+
+        # Try to extract from meta tags first
+        canonical_link = parser.css_first('link[rel="canonical"]')
+        if canonical_link:
+            url = canonical_link.attributes.get('href')
+
+        # Try meta property URL
+        if not url:
+            og_url = parser.css_first('meta[property="og:url"]')
+            if og_url:
+                url = og_url.attributes.get('content')
+
+        # Try to find deal/wine links in the page
+        if not url:
+            deal_links = parser.css('a[href*="/wine"], a[href*="/deal"], a.wine-link, a.deal-link, a[href*="wine"]')
+            for link in deal_links:
+                href = link.attributes.get('href')
+                if href:
+                    url = href
+                    break
+
+        # Fallback: construct from current page context or use placeholder
+        if not url:
+            url = "https://www.lastbottle.com/wine/unknown"
+
+        # Canonicalize URL - ensure it's absolute
+        if url and not url.startswith('http'):
+            if url.startswith('/'):
+                url = f"https://www.lastbottle.com{url}"
+            else:
+                url = f"https://www.lastbottle.com/{url}"
+
+        # Extract optional fields
+
+        # List price (retail price) - look for retail/MSRP price
+        list_price = None
+        retail_patterns = [
+            r'retail[:\s]*\$?([0-9,]+\.?[0-9]*)',
+            r'msrp[:\s]*\$?([0-9,]+\.?[0-9]*)',
+            r'list\s*price[:\s]*\$?([0-9,]+\.?[0-9]*)',
+            r'was[:\s]*\$?([0-9,]+\.?[0-9]*)',
+            r'retail\s*price[:\s]*\$?([0-9,]+\.?[0-9]*)'
+        ]
+
+        for pattern in retail_patterns:
+            match = re.search(pattern, all_text, re.IGNORECASE)
+            if match:
+                price_str = match.group(1).replace(',', '')
+                list_price = _to_float(price_str)
+                if list_price is not None:
+                    break
+
+        # Region - look for region/appellation information
+        region = None
+        region_patterns = [
+            r'(?:from|region):\s*([^,\n]+(?:,\s*[^,\n]+)?)',  # Capture up to two comma-separated parts
+            r'(?:appellation):\s*([^,\n]+)',
+            r'([A-Z][a-z]+\s+Valley)',  # Napa Valley, Sonoma Valley, etc.
+            r'from\s+([^,\n]+(?:,\s*[^,\n]+)?)',  # More general "from" pattern
+            r'(Bordeaux|Burgundy|Champagne|Tuscany|Rioja|Barossa Valley|Barossa)',  # Famous regions
+        ]
+
+        for pattern in region_patterns:
+            match = re.search(pattern, all_text, re.IGNORECASE)
+            if match:
+                region = match.group(1).strip()
+                break
+
+        return Deal(
+            title=wine_name,
+            price=deal_price,
+            list_price=list_price,
+            vintage=vintage,
+            region=region,
+            url=url,
+            bottle_size_ml=bottle_size_ml
         )
 
     except Exception:
