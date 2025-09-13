@@ -271,3 +271,4 @@ if __name__ == "__main__":
     else:
         print("Use 'python tests/test_live_lastbottle.py manual' to run manual test")
         print("Or use 'LIVE_TESTS=1 pytest tests/test_live_lastbottle.py -v' to run live tests")
+

@@ -421,3 +421,4 @@ class TestVivinoIntegration:
         assert result["rating"] is None
         assert result["price"] is None
         assert result["reviews"] is None
+

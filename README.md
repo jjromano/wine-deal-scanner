@@ -141,3 +141,4 @@ The application includes TODOs for areas requiring customization:
 ## License
 
 MIT License - see LICENSE file for details.
+

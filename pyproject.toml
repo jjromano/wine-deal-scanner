@@ -20,6 +20,7 @@ dependencies = [
     "structlog>=23.2.0",
     "tenacity>=8.2.0",
     "selectolax>=0.3.17",
+    "rapidfuzz>=3.0.0",
 ]
 
 [project.optional-dependencies]

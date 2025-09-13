@@ -371,3 +371,4 @@ class TestDealDetailsModel:
                 wine_name="Invalid Wine",
                 deal_price=-5.00  # Negative price not allowed
             )
+

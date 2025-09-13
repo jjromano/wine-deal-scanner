@@ -105,3 +105,4 @@ async def enrich_deal(deal: DealDetails) -> EnrichedDeal:
         )
 
     return enriched
+

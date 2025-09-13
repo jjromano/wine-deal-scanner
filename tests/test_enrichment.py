@@ -537,3 +537,4 @@ class TestEnrichmentIntegration:
             str_repr = str(enriched)
             expected = "Château Margaux 2015: $849.99 [Vintage: 4.6★, Overall: 4.5★]"
             assert str_repr == expected
+

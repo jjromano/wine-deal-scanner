@@ -1,31 +1,37 @@
-"""Configuration management for the wine deal scanner."""
-
 import os
 
-from dotenv import load_dotenv
+def _env_bool(name: str, default: bool=False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1","true","t","yes","y","on")
 
-# Load environment variables from .env file
-load_dotenv()
+DEBUG     = _env_bool("DEBUG", False)
+SAFE_MODE = _env_bool("SAFE_MODE", False)
+HEADFUL   = _env_bool("HEADFUL", False)
 
+# FORCE a normal desktop UA (ignore env until stable)
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
-def get_env_var(key: str, default: str | None = None) -> str:
-    """Get environment variable with optional default."""
-    value = os.getenv(key, default)
-    if value is None:
-        raise ValueError(f"Environment variable {key} is required but not set")
-    return value
+if DEBUG:
+    print(f"[config] UA set to: {USER_AGENT[:60]}...")
 
+LASTBOTTLE_URL = os.getenv("LASTBOTTLE_URL", "https://www.lastbottlewines.com/")
 
-# Required configuration
-LASTBOTTLE_URL: str = get_env_var("LASTBOTTLE_URL", "https://www.lastbottle.com")
-TELEGRAM_BOT_TOKEN: str = get_env_var("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID: str = get_env_var("TELEGRAM_CHAT_ID")
+GENERIC_MARKERS = (
+    "last bottle - your daily purveyor of fine wine",
+    "last bottle – your daily purveyor of fine wine",
+)
 
-# Optional configuration with defaults
-VIVINO_TIMEOUT_SECONDS: float = float(get_env_var("VIVINO_TIMEOUT_SECONDS", "1.5"))
-DEAL_DEDUP_MINUTES: int = int(get_env_var("DEAL_DEDUP_MINUTES", "5"))
-LOG_LEVEL: str = get_env_var("LOG_LEVEL", "INFO")
+def is_generic_title(title: str) -> bool:
+    t = (title or "").strip().lower()
+    return (not t) or any(m in t for m in GENERIC_MARKERS)
 
-# Safe mode and user agent configuration
-SAFE_MODE: bool = get_env_var("SAFE_MODE", "true").lower() == "true"
-USER_AGENT: str = get_env_var("USER_AGENT", "LastBottleWatcher/0.1 (+you@example.com)")
+def is_price_valid(x) -> bool:
+    try:
+        return x is not None and float(x) >= 5.0
+    except:
+        return False

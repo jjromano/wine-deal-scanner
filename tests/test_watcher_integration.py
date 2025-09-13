@@ -160,6 +160,7 @@ class TestWatcherIntegration:
         # Mock page
         mock_page = AsyncMock()
         mock_page.evaluate.side_effect = [True, None]  # dealCheckRequested, reset
+        mock_page.is_closed.return_value = False  # Page is not closed
         mock_page.content.return_value = """
         <html>
         <body>
@@ -204,6 +205,7 @@ class TestWatcherIntegration:
         # Mock page
         mock_page = AsyncMock()
         mock_page.evaluate.side_effect = [True, None]  # dealCheckRequested, reset
+        mock_page.is_closed.return_value = False  # Page is not closed
         mock_page.content.return_value = "<html><body>No deal content</body></html>"
         watcher.page = mock_page
 
