@@ -1,7 +1,7 @@
 # Core dependencies for wine deal scanner
-playwright==1.55.0
-playwright-stealth==2.0.0
-pydantic==2.10.0
-httpx==0.28.1
-python-dotenv==1.0.1
-structlog==25.4.0
+playwright>=1.55.0
+playwright-stealth>=2.0.0
+pydantic>=2.10.0
+httpx>=0.28.1
+python-dotenv>=1.0.1
+structlog>=25.4.0

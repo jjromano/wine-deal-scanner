@@ -6,6 +6,7 @@ from app import config
 from app.notify import telegram_send
 from app.models import Deal
 from app.domutils import extract_from_cta
+from app.keep_awake import start_keep_awake, stop_keep_awake
 
 def _deal_id(title: str) -> str:
     """Create a simple deal ID from the title"""
@@ -152,6 +153,9 @@ async def run_enhanced_watcher():
     """Enhanced watcher with working deal detection + improved Vivino lookups"""
     print(f"[enhanced] Starting enhanced watcher - DEBUG={config.DEBUG}")
     
+    # Start keeping computer awake
+    await start_keep_awake()
+    
     # Start playwright
     p = await async_playwright().start()
     try:
@@ -291,6 +295,9 @@ async def run_enhanced_watcher():
                 continue
                 
     finally:
+        # Stop keeping computer awake
+        await stop_keep_awake()
+        
         # Clean up
         try:
             await browser.close()
