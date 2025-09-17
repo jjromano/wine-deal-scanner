@@ -1,4 +1,8 @@
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 def _env_bool(name: str, default: bool=False) -> bool:
     v = os.getenv(name)

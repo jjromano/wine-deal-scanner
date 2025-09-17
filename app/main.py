@@ -27,12 +27,12 @@ async def _once():
         if not deal:
             print("notify-once: no deal parsed")
             return 2
-        vintage, overall = (None, None)
+        vintage, overall, vintage_year = (None, None, None)
         try:
-            vintage, overall = await fetch_vivino_info(browser, deal.title)
+            vintage, overall, vintage_year = await fetch_vivino_info(browser, deal.title)
         except Exception as e:
             if config.DEBUG: print("[vivino.debug] error:", e)
-        ok, status, body = await telegram_send(deal, (vintage, overall))
+        ok, status, body = await telegram_send(deal, (vintage, overall, vintage_year))
         print("notify-once:", ok, status, (body[:80] if isinstance(body,str) else body))
         await ctx.close()
         await browser.close()

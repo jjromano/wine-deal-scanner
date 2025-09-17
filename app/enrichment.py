@@ -2,8 +2,8 @@
 
 import structlog
 
-from .models import DealDetails, EnrichedDeal
-from .vivino import get_vivino_info
+from app.models import DealDetails, EnrichedDeal
+from app.vivino import get_vivino_info
 
 logger = structlog.get_logger(__name__)
 

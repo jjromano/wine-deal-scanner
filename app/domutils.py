@@ -19,6 +19,31 @@ async def extract_from_cta(page):
 
         function getPrice(container){
           const money = /\\$\\s*\\d[\\d,]*(?:\\.\\d{2})?/;
+          
+          // First priority: Look for "Last Bottle" price specifically
+          const followRight = container.querySelector('.follow-right');
+          if (followRight) {
+            const lastBottleHolder = followRight.querySelector('.price-holder');
+            if (lastBottleHolder && lastBottleHolder.innerText.toLowerCase().includes('last bottle')) {
+              const priceEl = lastBottleHolder.querySelector('div');
+              if (priceEl) {
+                const m = priceEl.innerText.match(money);
+                if (m) return m[0];
+              }
+            }
+          }
+          
+          // Second priority: Look for any element that contains "last bottle" text near a price
+          const elements = container.querySelectorAll('*');
+          for (const el of elements) {
+            const text = (el.innerText || '').toLowerCase();
+            if (text.includes('last bottle') && text.includes('$')) {
+              const m = text.match(money);
+              if (m) return m[0];
+            }
+          }
+          
+          // Last resort: original logic
           const pSel = ['.last-bottle-price','.deal-price','.price .current','.our-price','.price','[data-price]','[data-lb-price]'];
           for (const s of pSel) {
             const el = container.querySelector(s);
