@@ -9,12 +9,12 @@ Features:
 - Fallback to simple notifications if Vivino fails
 
 Usage:
-    python -m app.main
+    python -m app.main_enhanced
 """
 
 import asyncio
 import sys
-from app.watcher import run_enhanced_watcher
+from app.watcher_enhanced import run_enhanced_watcher
 
 async def main():
     print("🍷 Wine Deal Scanner")

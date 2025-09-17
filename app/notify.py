@@ -1,8 +1,13 @@
+"""Telegram notification functionality."""
+
+import httpx
+import os
+from urllib.parse import quote
 from app import config
-from app.models import EnrichedDeal
+
 
 def _fmt_triplet(t):
-    # t = (rating, count, avg_price, url) or (None,...)
+    """Format Vivino data triplet (rating, count, avg_price, url) for display."""
     if not t or not isinstance(t, tuple):
         return None  # Return None to indicate no data (line will be removed)
     
@@ -19,10 +24,9 @@ def _fmt_triplet(t):
     out = " ".join(filter(None, parts)).strip()
     return out if out else None
 
+
 async def telegram_send(deal, vivino_data):
-    import httpx, os
-    from urllib.parse import quote
-    
+    """Send Telegram notification for a wine deal."""
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     
@@ -99,80 +103,3 @@ async def telegram_send(deal, vivino_data):
                 print("[notify] status:", r.status_code, "body:", r.text)
             return True, r.status_code, r.text
     return False, 0, ""
-
-
-# Backward compatibility functions for tests
-class TelegramError(Exception):
-    """Exception for Telegram API errors."""
-    pass
-
-
-def _format_enriched_deal_message(enriched: EnrichedDeal) -> str:
-    """Format enriched deal for Telegram message."""
-    lines = []
-    
-    # Header
-    vintage_str = f" {enriched.vintage}" if enriched.vintage else ""
-    lines.append(f"🍷 New Deal: {enriched.wine_name}{vintage_str}")
-    
-    # Basic info
-    size_str = f"{enriched.bottle_size_ml}ml" if enriched.bottle_size_ml != 750 else "750ml"
-    lines.append(f"Size: {size_str}")
-    lines.append(f"Deal Price: ${enriched.deal_price:.2f}")
-    
-    # Vivino data
-    if enriched.vintage_rating or enriched.vintage_price or enriched.vintage_reviews:
-        rating_str = f"{enriched.vintage_rating:.1f}⭐" if enriched.vintage_rating else "—"
-        price_str = f"avg (${enriched.vintage_price:.2f})" if enriched.vintage_price else "—"
-        reviews_str = f"{enriched.vintage_reviews} reviews" if enriched.vintage_reviews else "— reviews"
-        lines.append(f"Vivino (vintage): {rating_str} — {price_str} — {reviews_str}")
-    
-    if enriched.overall_rating or enriched.overall_price or enriched.overall_reviews:
-        rating_str = f"{enriched.overall_rating:.1f}⭐" if enriched.overall_rating else "—"
-        price_str = f"avg (${enriched.overall_price:.2f})" if enriched.overall_price else "—"
-        reviews_str = f"{enriched.overall_reviews} reviews" if enriched.overall_reviews else "— reviews"
-        lines.append(f"Vivino (overall): {rating_str} — {price_str} — {reviews_str}")
-    
-    # Savings calculation
-    price_comparison = enriched.best_price_comparison
-    if price_comparison["savings"] and price_comparison["savings"] > 0:
-        savings = price_comparison["savings"]
-        savings_percent = price_comparison["savings_percent"]
-        lines.append(f"💰 Save ${savings:.2f} ({savings_percent:.1f}% off Vivino avg)")
-    
-    return "\n".join(lines)
-
-
-async def send_telegram_message(enriched: EnrichedDeal) -> bool:
-    """Send Telegram message for enriched deal."""
-    try:
-        import httpx, os
-        
-        token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-        
-        if not token or not chat_id:
-            if config.DEBUG:
-                print("[notify] Missing Telegram credentials")
-            return False
-        
-        message = _format_enriched_deal_message(enriched)
-        
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": message}
-            )
-            
-            if response.status_code != 200:
-                raise TelegramError(f"HTTP {response.status_code}: {response.text}")
-            
-            if config.DEBUG:
-                print(f"[notify] Telegram message sent successfully: {response.status_code}")
-            
-            return True
-            
-    except Exception as e:
-        if config.DEBUG:
-            print(f"[notify] send_telegram_message error: {e}")
-        return False

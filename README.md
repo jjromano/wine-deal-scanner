@@ -1,16 +1,16 @@
 # Wine Deal Scanner
 
-A Python application that watches LastBottle website for new wine deals, enriches them with Vivino ratings and pricing data, and sends notifications via Telegram.
+A Python application that monitors LastBottle website for new wine deals, enriches them with Vivino ratings and pricing data, and sends notifications via Telegram.
 
 ## Features
 
 - 🍷 **Real-time monitoring** of LastBottle website using Playwright
 - ⭐ **Vivino enrichment** with ratings, review counts, and average prices
 - 📱 **Telegram notifications** with formatted deal information
-- 🔄 **Smart deduplication** to avoid repeat notifications
+- 🔄 **Smart deal detection** to avoid repeat notifications
 - 🚀 **Async/await** throughout for optimal performance
-- ⚡ **Strict timeouts** to ensure responsiveness
-- 📝 **Structured logging** with detailed monitoring
+- 🛡️ **Advanced anti-detection** for Vivino lookups
+- 📝 **Fallback notifications** if Vivino fails
 
 ## Installation
 
@@ -41,10 +41,9 @@ TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
 TELEGRAM_CHAT_ID=your_telegram_chat_id_here
 
 # Optional (with defaults)
-LASTBOTTLE_URL=https://www.lastbottle.com
-VIVINO_TIMEOUT_SECONDS=1.5
-DEAL_DEDUP_MINUTES=5
-LOG_LEVEL=INFO
+DEBUG=false
+HEADFUL=false
+LASTBOTTLE_URL=https://www.lastbottlewines.com/
 ```
 
 ### Getting Telegram Credentials
@@ -56,29 +55,23 @@ LOG_LEVEL=INFO
 
 ```bash
 # Run the application
-make run
+python -m app.main
 
-# Format code
-make fmt
+# Run with debug output
+DEBUG=1 python -m app.main
 
-# Lint code
-make lint
-
-# Run tests
-make test
-
-# Clean build artifacts
-make clean
+# Run with visible browser (for debugging)
+HEADFUL=1 python -m app.main
 ```
 
 ## Architecture
 
 The application consists of several key components:
 
-- **`app/main.py`** - Main application loop with graceful shutdown
-- **`app/watcher.py`** - Playwright-based website monitoring
-- **`app/extract.py`** - Deal extraction from JSON/DOM
-- **`app/vivino.py`** - Vivino API integration with timeouts
+- **`app/main.py`** - Main application entry point
+- **`app/watcher.py`** - Playwright-based website monitoring with Vivino enrichment
+- **`app/domutils.py`** - Deal extraction from LastBottle DOM
+- **`app/vivino.py`** - Vivino lookup with anti-detection
 - **`app/notify.py`** - Telegram notification formatting and sending
 - **`app/models.py`** - Pydantic data models
 - **`app/config.py`** - Environment configuration management
@@ -86,24 +79,26 @@ The application consists of several key components:
 ## How It Works
 
 1. **Website Monitoring**: Uses Playwright to monitor LastBottle website
-   - Listens for XHR/JSON responses containing deal data
-   - Falls back to DOM mutation observation
-   - Persistent browser session for efficiency
+   - Refreshes page periodically to detect new deals
+   - Extracts wine title and "Last Bottle" price from DOM
+   - Generates unique deal IDs for deduplication
 
 2. **Deal Processing**: 
-   - Extracts deal information from API responses or DOM
-   - Generates unique keys for deduplication
+   - Extracts deal information using robust CSS selectors
    - Validates and normalizes data using Pydantic
+   - Skips generic titles and invalid prices
 
 3. **Vivino Enrichment**:
-   - Quick lookup with strict 1.5s timeout
-   - Fetches ratings, review counts, and average prices
-   - Graceful fallback if data unavailable
+   - Enhanced anti-detection with stealth browser contexts
+   - Searches for both vintage-specific and overall wine data
+   - Handles non-vintage wines appropriately
+   - Graceful fallback if blocked or data unavailable
 
 4. **Telegram Notifications**:
-   - Rich formatting with wine details and pricing
-   - Highlights savings and Vivino comparisons
-   - Retry logic for reliable delivery
+   - Rich formatting with wine details and Vivino data
+   - Direct links to Vivino wine pages when available
+   - Fallback to search links if direct links unavailable
+   - Always includes LastBottle link
 
 ## Development
 
@@ -113,8 +108,6 @@ The project uses modern Python tooling:
 - **Pydantic** for data validation
 - **Playwright** for browser automation
 - **httpx** for async HTTP requests
-- **structlog** for structured logging
-- **tenacity** for retry logic
 
 ## Testing
 
@@ -125,20 +118,10 @@ make test
 ```
 
 Tests cover:
-- Deal key generation and normalization
-- JSON extraction with various data formats
-- Mock payload processing
-
-## Limitations & TODOs
-
-The application includes TODOs for areas requiring customization:
-
-- **LastBottle selectors**: DOM selectors need updating based on actual website structure
-- **API endpoints**: Response monitoring patterns need refinement
-- **Vivino API**: May require different API approach or web scraping
-- **Rate limiting**: Consider implementing rate limits for external APIs
+- Vivino data parsing and extraction
+- Telegram notification formatting
+- Data model validation
 
 ## License
 
 MIT License - see LICENSE file for details.
-

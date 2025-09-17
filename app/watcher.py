@@ -1,124 +1,297 @@
-import asyncio, random, re
+import asyncio
+import random
+import re
 from playwright.async_api import async_playwright
 from app import config
-from app.domutils import extract_from_cta
 from app.notify import telegram_send
-from app.vivino_client import fetch_vivino_info
-from app.models import Deal, DealDetails, EnrichedDeal
-from app.enrichment import enrich_deal
+from app.models import Deal
+from app.domutils import extract_from_cta
 
 def _deal_id(title: str) -> str:
+    """Create a simple deal ID from the title"""
     return (title or "").strip().lower()
 
-async def run_watcher():
-    print(f"[watcher] flags DEBUG={config.DEBUG} SAFE_MODE={config.SAFE_MODE} HEADFUL={config.HEADFUL}")
+async def enhanced_vivino_lookup(browser, query: str):
+    """Enhanced Vivino lookup with advanced anti-detection"""
+    try:
+        # Create a new context specifically for Vivino with enhanced stealth
+        vivino_ctx = await browser.new_context(
+            user_agent=config.USER_AGENT, 
+            locale="en-US",
+            timezone_id="America/New_York",
+            geolocation={"longitude": -74.006, "latitude": 40.7128},
+            viewport={"width": 1366, "height": 768},
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+            }
+        )
+        
+        # Add stealth scripts to Vivino context
+        await vivino_ctx.add_init_script("""
+            // Override webdriver detection
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            
+            // Override plugins
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [
+                    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+                    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+                    { name: 'Native Client', filename: 'internal-nacl-plugin' }
+                ]
+            });
+            
+            // Override languages
+            Object.defineProperty(navigator, 'languages', { 
+                get: () => ['en-US', 'en'] 
+            });
+            
+            // Override chrome runtime
+            window.chrome = {
+                runtime: {}
+            };
+        """)
+        
+        page = await vivino_ctx.new_page()
+        
+        # Add random delay
+        await asyncio.sleep(random.uniform(2.0, 4.0))
+        
+        # Navigate to Vivino search
+        url = f"https://www.vivino.com/search/wines?q={query.replace(' ', '%20')}"
+        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        
+        # Human-like behavior
+        await page.mouse.move(random.randint(100, 500), random.randint(100, 400))
+        await asyncio.sleep(random.uniform(1.0, 2.0))
+        
+        # Wait for content with multiple fallbacks
+        try:
+            await page.wait_for_selector('[data-cy*="searchPage"], [data-testid*="search-page"], .wine-card, [class*="WineCard"]', timeout=10000)
+        except:
+            # If main selectors fail, try to wait for any content
+            await asyncio.sleep(2.0)
+        
+        # Extract data with multiple strategies
+        data = await page.evaluate("""
+            () => {
+                // Strategy 1: Look for wine cards
+                const cards = document.querySelectorAll('[data-cy*="wineCard"], [data-testid*="wine-card"], .wine-card, [class*="WineCard"]');
+                if (cards.length > 0) {
+                    const card = cards[0];
+                    const text = card.innerText || '';
+                    
+                    // Extract rating
+                    const ratingMatch = text.match(/\\b(\\d\\.\\d)\\b/);
+                    const rating = ratingMatch ? parseFloat(ratingMatch[1]) : null;
+                    
+                    // Extract review count
+                    const reviewMatch = text.match(/(\\d{1,3}(?:,\\d{3})*)\\s+ratings?/i);
+                    const reviewCount = reviewMatch ? parseInt(reviewMatch[1].replace(',', '')) : null;
+                    
+                    // Extract average price
+                    const priceMatch = text.match(/\\$\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)/);
+                    const avgPrice = priceMatch ? parseFloat(priceMatch[1].replace(',', '')) : null;
+                    
+                    // Extract link
+                    const linkEl = card.querySelector('a[href*="/wines/"], a[href*="/w/"]');
+                    const link = linkEl ? linkEl.href : null;
+                    
+                    return { rating, reviewCount, avgPrice, link };
+                }
+                
+                // Strategy 2: Look for any wine-related content
+                const bodyText = document.body.innerText || '';
+                const ratingMatch = bodyText.match(/\\b(\\d\\.\\d)\\b/);
+                const rating = ratingMatch ? parseFloat(ratingMatch[1]) : null;
+                
+                const reviewMatch = bodyText.match(/(\\d{1,3}(?:,\\d{3})*)\\s+ratings?/i);
+                const reviewCount = reviewMatch ? parseInt(reviewMatch[1].replace(',', '')) : null;
+                
+                const priceMatch = bodyText.match(/\\$\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)/);
+                const avgPrice = priceMatch ? parseFloat(priceMatch[1].replace(',', '')) : null;
+                
+                return { rating, reviewCount, avgPrice, link: null };
+            }
+        """)
+        
+        # Clean up the link if we got one
+        link = data.get('link')
+        if link and isinstance(link, str) and 'vivino.com' in link:
+            # Remove unwanted parameters
+            from urllib.parse import urlparse, parse_qs, urlunparse
+            try:
+                parsed = urlparse(link)
+                query_params = parse_qs(parsed.query)
+                query_params.pop('year', None)
+                query_params.pop('price_id', None)
+                
+                clean_query = '&'.join([f"{k}={v[0]}" for k, v in query_params.items() if v])
+                clean_parsed = parsed._replace(query=clean_query)
+                link = urlunparse(clean_parsed)
+            except:
+                pass
+        
+        return (data.get('rating'), data.get('reviewCount'), data.get('avgPrice'), link)
+        
+    except Exception as e:
+        if config.DEBUG:
+            print(f"[vivino] lookup error: {e}")
+        return (None, None, None, None)
+    finally:
+        # Always close the Vivino context
+        try:
+            await vivino_ctx.close()
+        except:
+            pass
+
+async def run_enhanced_watcher():
+    """Enhanced watcher with working deal detection + improved Vivino lookups"""
+    print(f"[enhanced] Starting enhanced watcher - DEBUG={config.DEBUG}")
     
-    # Don't use async context manager to avoid premature browser closure
+    # Start playwright
     p = await async_playwright().start()
     try:
         browser = await p.chromium.launch(headless=not config.HEADFUL)
-        # MAKE SURE we pass the forced UA
+        # Use the same simple context as minimal version for LastBottle
         ctx = await browser.new_context(user_agent=config.USER_AGENT, locale="en-US")
-        # Minor stealth
-        await ctx.add_init_script("""
-          Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-          Object.defineProperty(navigator, 'languages', { get: () => ['en-US','en'] });
-          Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel' });
-        """)
-        page = await ctx.new_page()
-        print("[watcher] request blocking DISABLED (MVP)")
-        await page.goto(config.LASTBOTTLE_URL, wait_until="domcontentloaded")
-
-        # Skip MutationObserver for now to debug the issue
-        # async def _on_deal_change(source, payload):
-        #     try:
-        #         title = (payload or {}).get("title") or ""
-        #         price_text = (payload or {}).get("priceText") or ""
-        #         price = None
-        #         m = re.search(r"\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)", price_text)
-        #         if m:
-        #             try: price = float(m.group(1).replace(",", ""))
-        #             except: pass
-        #         if config.is_generic_title(title):
-        #             if config.DEBUG: print(f"[mo] (skip generic) {title!r}")
-        #             return
-        #         if price is not None and price < 5.0:
-        #             price = None
-        #         page._last_mo = {"title": title, "price": price}
-        #         if config.DEBUG: print(f"[mo] change title={title!r} price={price}")
-        #     except Exception as e:
-        #         print("[mo] error:", e)
-
-        # await page.expose_binding("pyDealChanged", _on_deal_change)
-
-        # Skip MutationObserver for now to debug the issue
-        pass
-
-        # Fallback: small poll that prefers MO cache
-        last_id = None
         
-        async def get_dom_deal():
-            # Skip MutationObserver cache for now
-            # if getattr(page, "_last_mo", None):
-            #     d = page._last_mo
-            #     return d.get("title") or "", d.get("price")
-            try:
-                title, price = await extract_from_cta(page)
-                return title, price
-            except Exception as e:
-                if config.DEBUG: print("[poll] error", e)
-                return "", None
-
+        page = await ctx.new_page()
+        
+        print("[enhanced] Navigating to LastBottle...")
+        await page.goto(config.LASTBOTTLE_URL, wait_until="domcontentloaded")
+        
+        # Track the last deal we saw
+        last_deal_id = None
+        notification_count = 0
+        
+        print("[enhanced] Starting deal monitoring loop...")
+        
         while True:
             try:
-                await asyncio.sleep(0.6 + random.random()*0.2)
-                title, price = await get_dom_deal()
+                # Wait a bit between checks - use same timing as minimal
+                await asyncio.sleep(2.0 + random.random() * 1.0)
+                
+                # Refresh the page to get the latest deal
+                if config.DEBUG:
+                    print("[enhanced] Refreshing page to check for new deals...")
+                await page.reload(wait_until="domcontentloaded")
+                await asyncio.sleep(1.0)  # Give it a moment to fully load
+                
+                # Extract current deal info using the working extraction logic
+                title, price = await extract_from_cta(page)
+                
+                if config.DEBUG:
+                    print(f"[enhanced] Current: title='{title}' price={price}")
+                
+                # Skip if no title or generic title
                 if not title or config.is_generic_title(title):
-                    if config.DEBUG and title: print(f"[dom.peek] (generic) {title!r}")
+                    if config.DEBUG and title:
+                        print(f"[enhanced] Skipping generic title: {title}")
                     continue
+                
+                # Skip if price is too low (likely invalid)
                 if price is not None and price < 5.0:
+                    if config.DEBUG:
+                        print(f"[enhanced] Skipping low price: {price}")
                     price = None
-
-                if config.DEBUG:
-                    print(f"[dom.peek] title={title!r} price={price}")
-
-                nid = _deal_id(title)
-                if config.DEBUG:
-                    print(f"[deal_id] current='{nid}' last='{last_id}'")
                 
-                if not nid:
-                    if config.DEBUG: print("[deal_id] skipping - no valid deal ID")
-                    continue
-                if nid == last_id:
-                    if config.DEBUG: print("[deal_id] skipping - same deal as last time")
-                    continue  # Same deal, no need to send notification
+                # Create deal ID
+                current_deal_id = _deal_id(title)
                 
-                if config.DEBUG: print(f"[deal_id] NEW DEAL DETECTED! '{nid}' != '{last_id}'")
-                last_id = nid
-
-                deal = Deal(title=title.strip(), price=(price or 0.0), bottle_size_ml=750, url=config.LASTBOTTLE_URL)
                 if config.DEBUG:
-                    print(f"[event] deal_changed id='{nid}' title='{deal.title}' price=${deal.price:.2f}")
-
-                # Keep Vivino call; we're focusing on flips
-                try:
-                    vintage, overall, vintage_year = await fetch_vivino_info(browser, deal.title, existing_page=page)
-                except Exception as e:
-                    if config.DEBUG: print("[vivino.debug] error:", e)
-                    vintage, overall, vintage_year = (None, None, None)
-
-                await telegram_send(deal, (vintage, overall, vintage_year))
+                    print(f"[enhanced] Deal ID: current='{current_deal_id}' last='{last_deal_id}'")
+                
+                # Check if this is a new deal
+                if current_deal_id and current_deal_id != last_deal_id:
+                    print(f"[enhanced] 🎉 NEW DEAL DETECTED!")
+                    print(f"[enhanced] Title: {title}")
+                    print(f"[enhanced] Price: ${price:.2f}" if price else "[enhanced] Price: Unknown")
+                    
+                    # Create deal object - ensure price is valid for Pydantic
+                    deal_price = price if price and price > 0 else 1.0  # Use 1.0 as fallback to satisfy gt=0
+                    deal = Deal(
+                        title=title.strip(),
+                        price=deal_price,
+                        bottle_size_ml=750,
+                        url=config.LASTBOTTLE_URL
+                    )
+                    
+                    # Try to get Vivino data
+                    vivino_data = None
+                    try:
+                        print("[enhanced] Looking up Vivino data...")
+                        
+                        # Check if this is a non-vintage wine
+                        is_non_vintage = ' NV' in title or ' Non-Vintage' in title or ' non-vintage' in title
+                        
+                        # Extract vintage year
+                        vintage_year = None
+                        if not is_non_vintage:
+                            year_match = re.search(r'\b(19|20)\d{2}\b', title)
+                            vintage_year = year_match.group(0) if year_match else None
+                        
+                        # Create queries
+                        with_vintage_query = title
+                        without_vintage_query = re.sub(r'\b(19|20)\d{2}\b','', title).strip() if vintage_year else title
+                        
+                        # Search for overall data (without vintage)
+                        overall_result = None
+                        if without_vintage_query != with_vintage_query or is_non_vintage:
+                            overall_result = await enhanced_vivino_lookup(browser, without_vintage_query)
+                            if config.DEBUG:
+                                print(f"[enhanced] Overall search result: {overall_result}")
+                        
+                        # Search for vintage-specific data (with vintage)
+                        vintage_result = None
+                        if with_vintage_query and not is_non_vintage:
+                            await asyncio.sleep(random.uniform(3.0, 5.0))  # Delay between searches
+                            vintage_result = await enhanced_vivino_lookup(browser, with_vintage_query)
+                            if config.DEBUG:
+                                print(f"[enhanced] Vintage search result: {vintage_result}")
+                        
+                        vivino_data = (vintage_result, overall_result, vintage_year)
+                        
+                    except Exception as e:
+                        if config.DEBUG:
+                            print(f"[enhanced] Vivino lookup failed: {e}")
+                        vivino_data = None
+                    
+                    # Send notification
+                    try:
+                        print("[enhanced] Sending Telegram notification...")
+                        await telegram_send(deal, vivino_data)
+                        notification_count += 1
+                        print(f"[enhanced] ✅ Notification sent! (Total: {notification_count})")
+                    except Exception as e:
+                        print(f"[enhanced] ❌ Failed to send notification: {e}")
+                        # Try sending without Vivino data as fallback
+                        try:
+                            print("[enhanced] Trying fallback notification without Vivino data...")
+                            await telegram_send(deal, None)
+                            notification_count += 1
+                            print(f"[enhanced] ✅ Fallback notification sent! (Total: {notification_count})")
+                        except Exception as e2:
+                            print(f"[enhanced] ❌ Fallback notification also failed: {e2}")
+                    
+                    # Update last deal
+                    last_deal_id = current_deal_id
+                else:
+                    if config.DEBUG:
+                        print("[enhanced] Same deal, no notification needed")
                 
             except Exception as e:
-                print(f"[watcher] ERROR in main loop: {e}")
-                print(f"[watcher] Error type: {type(e)}")
+                print(f"[enhanced] ❌ Error in main loop: {e}")
                 import traceback
                 traceback.print_exc()
                 # Continue the loop even if there's an error
                 continue
-            
+                
     finally:
-        # Clean up manually
+        # Clean up
         try:
             await browser.close()
         except:
@@ -127,65 +300,3 @@ async def run_watcher():
             await p.stop()
         except:
             pass
-
-
-# Backward compatibility classes/functions for tests
-class DealWatcher:
-    """Backward compatibility class for tests."""
-    
-    def __init__(self):
-        self.last_deals = {}
-    
-    async def _process_deal_details(self, deal_details: DealDetails, source: str = "test"):
-        """Process deal details with enrichment and notification."""
-        try:
-            # Enrich the deal
-            enriched_deal = await enrich_deal(deal_details)
-            
-            # Send notification
-            await send_telegram_message(enriched_deal)
-            
-            # Store for deduplication
-            from app.extract import deal_key
-            key = deal_key(deal_details.wine_name, deal_details.vintage, deal_details.deal_price)
-            self.last_deals[key] = enriched_deal
-            
-        except Exception as e:
-            if config.DEBUG:
-                print(f"[watcher] process_deal_details error: {e}")
-
-
-async def send_telegram_message(enriched_deal: EnrichedDeal) -> bool:
-    """Send Telegram message for enriched deal."""
-    try:
-        # Convert EnrichedDeal to Deal format for current telegram_send
-        deal = Deal(
-            title=enriched_deal.wine_name,
-            price=enriched_deal.deal_price,
-            bottle_size_ml=enriched_deal.bottle_size_ml,
-            vintage=str(enriched_deal.vintage) if enriched_deal.vintage else None,
-            url=config.LASTBOTTLE_URL
-        )
-        
-        # Create vivino data tuple
-        vintage_data = (
-            enriched_deal.vintage_rating,
-            enriched_deal.vintage_reviews, 
-            enriched_deal.vintage_price,
-            None  # URL not available in EnrichedDeal
-        )
-        
-        overall_data = (
-            enriched_deal.overall_rating,
-            enriched_deal.overall_reviews,
-            enriched_deal.overall_price, 
-            None  # URL not available in EnrichedDeal
-        )
-        
-        await telegram_send(deal, (vintage_data, overall_data))
-        return True
-        
-    except Exception as e:
-        if config.DEBUG:
-            print(f"[watcher] send_telegram_message error: {e}")
-        return False
